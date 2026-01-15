@@ -1,0 +1,17 @@
+{
+  "name": "proctoring-system",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "apps/backend",
+    "apps/frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm --prefix apps/backend run dev\" \"npm --prefix apps/frontend start\"",
+    "build": "npm --prefix apps/backend run build && npm --prefix apps/frontend run build",
+    "start": "npm --prefix apps/backend start"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.1"
+  }
+}

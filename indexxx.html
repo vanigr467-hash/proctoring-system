@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CloudProctor - Real-time Exam Proctoring Demo</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/face-landmarks-detection@latest"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; background: #f0f2f5; }
+        .dashboard { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; padding: 20px; }
+        .student-feed { border: 2px solid #ddd; border-radius: 12px; overflow: hidden; background: white; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        .feed-header { background: #2563eb; color: white; padding: 12px; display: flex; justify-content: space-between; align-items: center; }
+        .alert { background: #ef4444; color: white; padding: 4px 8px; border-radius: 20px; font-size: 12px; }
+        video { width: 100%; height: 240px; object-fit: cover; }
+        .controls { padding: 12px; display: flex; gap: 8px; }
+        button { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        .terminate { background: #ef4444; color: white; }
+        .chat { background: #10b981; color: white; }
+        .login { max-width: 400px; margin: 100px auto; padding: 40px; background: white; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.15); }
+        .tab-switch { background: #f59e0b; animation: pulse 1s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        #student-video, #faculty-video { width: 100%; height: 300px; background: #000; }
+        .role-selector { display: flex; gap: 20px; justify-content: center; margin-bottom: 20px; }
+        .role-btn { padding: 12px 24px; background: #6b7280; color: white; border: none; border-radius: 8px; cursor: pointer; }
+        .role-btn.active { background: #2563eb; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div id="login" class="login">
+        <h2>CloudProctor Demo</h2>
+        <p>Select Role:</p>
+        <div class="role-selector">
+            <button id="faculty-btn" class="role-btn">Faculty</button>
+            <button id="student-btn" class="role-btn active">Student</button>
+        </div>
+        <div id="faculty-login">
+            <input id="faculty-room" placeholder="Room ID (e.g., exam123)" />
+            <button onclick="joinAsFaculty()">Monitor Room</button>
+        </div>
+        <div id="student-login">
+            <input id="student-name" placeholder="Your Name" />
+            <input id="student-room" placeholder="Room ID" />
+            <button onclick="joinAsStudent()">Join Exam</button>
+        </div>
+    </div>
+
+    <div id="faculty-dashboard" class="hidden">
+        <h1>Faculty Dashboard - Live Monitoring</h1>
+        <div id="students-grid" class="dashboard"></div>
+    </div>
+
+    <div id="student-view" class="hidden">
+        <div class="feed-header">
+            <span>Live Proctoring Session</span>
+            <div id="alerts"></div>
+        </div>
+        <video id="student-video" autoplay muted></video>
+        <div class="controls">
+            <button onclick="toggleScreenShare()">Toggle Screen Share</button>
+            <button onclick="endSession()">End Session</button>
+        </div>
+        <div id="status">Status: Monitoring...</div>
+    </div>
+
+    <script>
+        const socket = io('https://your-socket-server.onrender.com'); // Replace with deployed Socket.io server
+        let model, stream, peerConnections = {}, localStream, faceMatcher;
+        let isFaculty = false, currentRoom = '';
+        let violationCount = 0;
+        let screenSharing = false;
+
+        // Role selection
+        document.getElementById('faculty-btn').onclick = () => {
+            document.querySelectorAll('.role-btn').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+            document.getElementById('faculty-login').classList.remove('hidden');
+            document.getElementById('student-login').classList.add('hidden');
+        };
+        document.getElementById('student-btn').onclick = () => {
+            document.querySelectorAll('.role-btn').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+            document.getElementById('student-login').classList.remove('hidden');
+            document.getElementById('faculty-login').classList.add('hidden');
+        };
+
+        async function initML() {
+            await tf.setBackend('webgl');
+            model = await faceLandmarksDetection.load(
+                faceLandmarksDetection.SupportedPackages.mediapipeFacemesh
+            );
+            console.log('ML Model loaded');
+        }
+
+        async function detectFace(video) {
+            if (!model) return;
+            const faces = await model.estimateFaces(video);
+            const hasFace = faces.length > 0;
+            if (!hasFace) {
+                violationCount++;
+                document.getElementById('alerts').innerHTML = '<span class="alert">No Face Detected</span>';
+                socket.emit('violation', { type: 'no-face', count: violationCount });
+            } else if (faces.length > 1) {
+                violationCount++;
+                document.getElementById('alerts').innerHTML = '<span class="alert">Multiple Faces</span>';
+                socket.emit('violation', { type: 'multi-face', count: violationCount });
+            } else {
+                document.getElementById('alerts').innerHTML = '';
+            }
+            setTimeout(() => detectFace(video), 2000);
+        }
+
+        async function joinAsStudent() {
+            const name = document.getElementById('student-name').value;
+            currentRoom = document.getElementById('student-room').value;
+            if (!name || !currentRoom) return alert('Fill all fields');
+            isFaculty = false;
+            document.getElementById('login').classList.add('hidden');
+            document.getElementById('student-view').classList.remove('hidden');
+            socket.emit('join-room', { room: currentRoom, name, role: 'student' });
+
+            localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            document.getElementById('student-video').srcObject = localStream;
+            detectFace(localStream);
+
+            // Mock screen share toggle
+            window.toggleScreenShare = async () => {
+                if (screenSharing) {
+                    localStream.getVideoTracks()[0].enabled = true;
+                } else {
+                    const screen = await navigator.mediaDevices.getDisplayMedia({ video: true });
+                    document.getElementById('student-video').srcObject = screen;
+                }
+                screenSharing = !screenSharing;
+            };
+        }
+
+        function joinAsFaculty() {
+            currentRoom = document.getElementById('faculty-room').value;
+            if (!currentRoom) return alert('Enter Room ID');
+            isFaculty = true;
+            document.getElementById('login').classList.add('hidden');
+            document.getElementById('faculty-dashboard').classList.remove('hidden');
+            socket.emit('join-room', { room: currentRoom, role: 'faculty' });
+        }
+
+        socket.on('student-joined', (data) => {
+            if (isFaculty) {
+                addStudentFeed(data.id, data.name);
+            }
+        });
+
+        socket.on('violation-update', (data) => {
+            if (isFaculty) {
+                updateStudentAlert(data.studentId, data.type);
+            }
+        });
+
+        function addStudentFeed(id, name) {
+            const grid = document.getElementById('students-grid');
+            const feed = document.createElement('div');
+            feed.className = 'student-feed';
+            feed.id = `feed-${id}`;
+            feed.innerHTML = `
+                <div class="feed-header">
+                    <span>${name}</span>
+                    <span id="alert-${id}" class="alert hidden">ALERT</span>
+                </div>
+                <video id="video-${id}" autoplay playsinline></video>
+                <div class="controls">
+                    <button class="chat" onclick="chatWith('${id}')">Chat</button>
+                    <button class="terminate" onclick="terminate('${id}')">Terminate</button>
+                </div>
+            `;
+            grid.appendChild(feed);
+
+            // Mock WebRTC stream (in production, establish peer connection)
+            const video = document.getElementById(`video-${id}`);
+            video.srcObject = localStream; // Simulate stream
+        }
+
+        function updateStudentAlert(studentId, type) {
+            const alertEl = document.getElementById(`alert-${studentId}`);
+            alertEl.textContent = type.toUpperCase();
+            alertEl.classList.remove('hidden');
+            alertEl.parentElement.parentElement.classList.add('tab-switch');
+        }
+
+        window.chatWith = (id) => alert(`Chat with student ${id}`);
+        window.terminate = (id) => {
+            if (confirm('Terminate session?')) {
+                socket.emit('terminate-student', { room: currentRoom, studentId: id });
+                document.getElementById(`feed-${id}`).remove();
+            }
+        };
+        window.endSession = () => socket.emit('leave-room', currentRoom);
+
+        initML();
+    </script>
+</body>
+</html>
