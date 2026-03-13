@@ -41,36 +41,6 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "bcrypt", "-q"])
     import bcrypt
 
-# MongoDB imports
-try:
-    from pymongo import MongoClient
-    from pymongo.errors import ConnectionFailure, DuplicateKeyError
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pymongo python-dotenv", "-q"])
-    from pymongo import MongoClient
-    from pymongo.errors import ConnectionFailure, DuplicateKeyError
-    from dotenv import load_dotenv
-    load_dotenv()
-
-# Email imports
-try:
-    import smtplib
-    from email.mime.text import MIMEText
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.base64 import MIMEBase
-    from email import encoders
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "secure-smtplib", "-q"])
-    import smtplib
-    from email.mime.text import MIMEText
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.base64 import MIMEBase
-    from email import encoders
-
 # ─────────────────────────────────────────────────────────────────
 # APP CONFIGURATION
 # ─────────────────────────────────────────────────────────────────
@@ -78,14 +48,6 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'bloodbridge-ultra-secure-2024-xK9$mP2#')
 app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'jwt-bb-secret-9mN$kL3@qR7')
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
-
-# Email configuration
-app.config['MAIL_SERVER'] = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')
-app.config['MAIL_PORT'] = int(os.environ.get('MAIL_PORT', 587))
-app.config['MAIL_USE_TLS'] = os.environ.get('MAIL_USE_TLS', 'True').lower() == 'true'
-app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME', '')
-app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD', '')
-app.config['MAIL_DEFAULT_SENDER'] = os.environ.get('MAIL_DEFAULT_SENDER', 'noreply@bloodbridge.ai')
 
 CORS(app, origins="*", supports_credentials=True)
 jwt = JWTManager(app)
@@ -164,105 +126,43 @@ def _match_donors(blood_group, lat, lng, urgency, donors_list, max_radius=50):
                 days = (datetime.utcnow() - datetime.fromisoformat(last)).days
                 rec_score = min(15, days // 8)
             except: rec_score = 8
-
-        match_score = (dist_score + don_score + avail_score + rec_score) * urgency_mult
-        matched.append({
-            'id': d['id'], 'user_id': d['user_id'], 'name': d['name'],
-            'blood_group': d['blood_group'], 'distance_km': round(dist, 2),
-            'match_score': round(match_score, 2)
-        })
-    return sorted(matched, key=lambda x: x['match_score'], reverse=True)
+        else: rec_score = 15
+        score = min(100, (dist_score + don_score + avail_score + rec_score) * urgency_mult)
+        matched.append({**d, 'distance_km': round(dist, 2), 'match_score': round(score, 1)})
+    matched.sort(key=lambda x: x['match_score'], reverse=True)
+    return matched
 
 # ─────────────────────────────────────────────────────────────────
-# MONGODB DATABASE CONNECTION
+# IN-MEMORY DATABASE  (MongoDB Collections Equivalent)
 # ─────────────────────────────────────────────────────────────────
-
-# MongoDB connection
-MONGODB_URI = os.environ.get('MONGODB_URI', 'mongodb://localhost:27017/bloodbridge')
-mongo_client = None
-db = None
-
-def connect_to_mongodb():
-    """Establish connection to MongoDB"""
-    global mongo_client, db
-    try:
-        mongo_client = MongoClient(MONGODB_URI)
-        # Test connection
-        mongo_client.admin.command('ping')
-        db_name = MONGODB_URI.split('/')[-1].split('?')[0]
-        db = mongo_client[db_name]
-        print(f"✅ Connected to MongoDB: {db_name}")
-        return True
-    except ConnectionFailure as e:
-        print(f"❌ MongoDB connection failed: {e}")
-        return False
-    except Exception as e:
-        print(f"❌ MongoDB error: {e}")
-        return False
-
-class MongoDB:
-    """MongoDB wrapper for BloodBridge AI"""
-    
+class DB:
     def __init__(self):
-        if not connect_to_mongodb():
-            raise Exception("Failed to connect to MongoDB")
+        self.users          = []
+        self.donors         = []
+        self.blood_requests = []
+        self.notifications  = []
+        self.logs           = []
         self._seed()
-    
-    # ── Collections ──────────────────────────────────────────────
-    @property
-    def users(self):
-        return db.users
-    
-    @property
-    def donors(self):
-        return db.donors
-    
-    @property
-    def blood_requests(self):
-        return db.blood_requests
-    
-    @property
-    def notifications(self):
-        return db.notifications
-    
-    @property
-    def logs(self):
-        return db.logs
-    
+
     # ── Helpers ──────────────────────────────────────────────────
     def find_user(self, uid):
-        return self.users.find_one({'id': uid})
-    
+        return next((u for u in self.users if u['id'] == uid), None)
+
     def find_user_by_email(self, email):
-        return self.users.find_one({'email': email})
-    
+        return next((u for u in self.users if u['email'] == email), None)
+
     def find_donor_by_user(self, uid):
-        return self.donors.find_one({'user_id': uid})
-    
+        return next((d for d in self.donors if d['user_id'] == uid), None)
+
     def find_request(self, rid):
-        return self.blood_requests.find_one({'id': rid})
-    
-    def get_all_donors(self):
-        return list(self.donors.find())
-    
-    def get_all_users(self):
-        return list(self.users.find())
-    
-    def get_all_requests(self):
-        return list(self.blood_requests.find())
-    
-    def get_all_notifications(self):
-        return list(self.notifications.find())
-    
-    def get_all_logs(self):
-        return list(self.logs.find())
+        return next((r for r in self.blood_requests if r['id'] == rid), None)
 
     # ── Seed ─────────────────────────────────────────────────────
     def _seed(self):
         def H(pw): return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 
         # Admin
-        self.users.insert_one({
+        self.users.append({
             'id': 'admin-001', 'name': 'System Admin',
             'email': 'admin@bloodbridge.org', 'password': H('admin123'),
             'role': 'admin', 'phone': '+1-800-BLOOD-AI', 'is_active': True,
@@ -280,13 +180,13 @@ class MongoDB:
         ]
         for i, (name, email, bg, lat, lng, avail, dons, days_ago) in enumerate(donors_seed):
             uid = f'donor-{i+1:03d}'
-            self.users.insert_one({
+            self.users.append({
                 'id': uid, 'name': name, 'email': email,
                 'password': H('pass123'), 'role': 'donor',
                 'phone': f'+919{i+1}0{i*3:07d}', 'is_active': True,
                 'created_at': _now()
             })
-            self.donors.insert_one({
+            self.donors.append({
                 'id': f'dnr-{i+1:03d}', 'user_id': uid,
                 'blood_group': bg, 'availability': avail,
                 'lat': lat, 'lng': lng,
@@ -298,7 +198,7 @@ class MongoDB:
             })
 
         # Hospital
-        self.users.insert_one({
+        self.users.append({
             'id': 'hosp-001', 'name': 'City General Hospital',
             'email': 'hospital@citygeneral.com', 'password': H('hosp123'),
             'role': 'hospital', 'phone': '+91-80-2345-6789', 'is_active': True,
@@ -306,7 +206,7 @@ class MongoDB:
         })
 
         # Patient
-        self.users.insert_one({
+        self.users.append({
             'id': 'pat-001', 'name': 'John Patient',
             'email': 'patient@example.com', 'password': H('patient123'),
             'role': 'patient', 'phone': '+91-99876-54321', 'is_active': True,
@@ -314,7 +214,7 @@ class MongoDB:
         })
 
         # Sample blood request
-        self.blood_requests.insert_one({
+        self.blood_requests.append({
             'id': 'req-demo-001',
             'requester_id': 'hosp-001',
             'requester_name': 'City General Hospital',
@@ -331,10 +231,10 @@ class MongoDB:
             'updated_at': _now(-1)
         })
         # Run initial match for demo request
-        matched = _match_donors('O+', 12.9716, 77.5946, 'critical', self.get_all_donors())
-        self.blood_requests.update_one({'id': 'req-demo-001'}, {'$set': {'matched_donors': matched[:8]}})
+        matched = _match_donors('O+', 12.9716, 77.5946, 'critical', self.donors)
+        self.blood_requests[0]['matched_donors'] = matched[:8]
 
-db = MongoDB()
+db = DB()
 
 # ─────────────────────────────────────────────────────────────────
 # ADDITIONAL UTILITY FUNCTIONS
@@ -345,11 +245,11 @@ def _create_notif(user_id, ntype, title, message, data=None):
         'title': title, 'message': message, 'data': data or {},
         'read': False, 'created_at': _now()
     }
-    db.notifications.insert_one(n)
+    db.notifications.append(n)
     return n
 
 def _log(action, user_id=None, details=None):
-    db.logs.insert_one({
+    db.logs.append({
         'id': str(uuid.uuid4()), 'action': action,
         'user_id': user_id, 'details': details, 'timestamp': _now()
     })
@@ -390,10 +290,10 @@ def register():
         'role': d['role'], 'phone': d.get('phone', ''), 'is_active': True,
         'created_at': _now()
     }
-    db.users.insert_one(user)
+    db.users.append(user)
 
     if d['role'] == 'donor':
-        db.donors.insert_one({
+        db.donors.append({
             'id': str(uuid.uuid4()), 'user_id': uid,
             'blood_group': d.get('blood_group', 'O+'),
             'availability': True,
@@ -441,7 +341,7 @@ def get_me():
 def get_donors():
     bg   = request.args.get('blood_group')
     avail = request.args.get('available') == 'true'
-    donors = db.get_all_donors()
+    donors = db.donors
     if bg:    donors = [d for d in donors if d['blood_group'] == bg]
     if avail: donors = [d for d in donors if d.get('availability')]
     return jsonify(donors), 200
@@ -468,7 +368,6 @@ def update_donor_profile():
         u = db.find_user(uid)
         if u: u['name'] = d['name']
     _log('update_donor_profile', uid)
-    db.donors.update_one({'id': donor['id']}, {'$set': donor})
     return jsonify(donor), 200
 
 @app.route('/api/donors/availability', methods=['PATCH'])
@@ -482,7 +381,6 @@ def toggle_availability():
     socketio.emit('donor_status_changed', {
         'donor_id': donor['id'], 'availability': donor['availability'], 'name': donor['name']
     })
-    db.donors.update_one({'id': donor['id']}, {'$set': donor})
     return jsonify({'availability': donor['availability']}), 200
 
 @app.route('/api/donors/location', methods=['PATCH'])
@@ -495,7 +393,6 @@ def update_location():
     if 'lat' not in d or 'lng' not in d:
         return jsonify({'error': 'lat and lng required'}), 400
     donor['lat'], donor['lng'] = float(d['lat']), float(d['lng'])
-    db.donors.update_one({'id': donor['id']}, {'$set': donor})
     return jsonify({'lat': donor['lat'], 'lng': donor['lng']}), 200
 
 # ─────────────────────────────────────────────────────────────────
@@ -507,7 +404,7 @@ def get_requests():
     claims = get_jwt()
     uid    = get_jwt_identity()
     role   = claims.get('role')
-    reqs   = db.get_all_requests()
+    reqs   = db.blood_requests
 
     if role == 'donor':
         donor = db.find_donor_by_user(uid)
@@ -552,14 +449,14 @@ def create_request():
         'accepted_donors': [],
         'created_at': _now(), 'updated_at': _now()
     }
-    db.blood_requests.insert_one(req)
+    db.blood_requests.append(req)
     _log('create_request', uid, {'bg': d['blood_group'], 'urgency': d['urgency']})
 
     # Notify each matched donor via socket
     for m in matched[:10]:
         notif = _create_notif(
             m['user_id'], 'emergency_request',
-            f" {d['urgency'].upper()} — {d['blood_group']} Blood Needed",
+            f"🚨 {d['urgency'].upper()} — {d['blood_group']} Blood Needed",
             f"{d['hospital_name']} needs {d['blood_group']} blood. "
             f"You are {m['distance_km']} km away. Match score: {m['match_score']}.",
             {'request_id': req['id']}
@@ -618,7 +515,7 @@ def respond_to_request(rid):
 
         notif = _create_notif(
             req['requester_id'], 'donor_accepted',
-            ' Donor Accepted Your Request!',
+            '✅ Donor Accepted Your Request!',
             f"{donor['name']} (Blood: {donor['blood_group']}) accepted the blood request.",
             {'request_id': rid, 'donor_id': donor['id']}
         )
@@ -666,7 +563,7 @@ def update_request_status(rid):
 @jwt_required()
 def get_notifs():
     uid = get_jwt_identity()
-    notifs = sorted([n for n in db.get_all_notifications() if n['user_id'] == uid],
+    notifs = sorted([n for n in db.notifications if n['user_id'] == uid],
                     key=lambda x: x['created_at'], reverse=True)
     return jsonify(notifs), 200
 
@@ -674,7 +571,7 @@ def get_notifs():
 @jwt_required()
 def mark_read(nid):
     uid = get_jwt_identity()
-    n = next((x for x in db.get_all_notifications() if x['id'] == nid and x['user_id'] == uid), None)
+    n = next((x for x in db.notifications if x['id'] == nid and x['user_id'] == uid), None)
     if not n: return jsonify({'error': 'Not found'}), 404
     n['read'] = True
     return jsonify(n), 200
@@ -683,7 +580,7 @@ def mark_read(nid):
 @jwt_required()
 def mark_all_read():
     uid = get_jwt_identity()
-    for n in db.get_all_notifications():
+    for n in db.notifications:
         if n['user_id'] == uid: n['read'] = True
     return jsonify({'status': 'ok'}), 200
 
@@ -693,22 +590,22 @@ def mark_all_read():
 @app.route('/api/admin/stats', methods=['GET'])
 @_role_required('admin')
 def admin_stats():
-    reqs = db.get_all_requests()
+    reqs = db.blood_requests
     total_r, pending_r, matched_r, closed_r = len(reqs), 0, 0, 0
     for r in reqs:
         if r['status'] == 'pending': pending_r += 1
         elif r['status'] == 'matched': matched_r += 1
         elif r['status'] == 'closed': closed_r += 1
     bg_stats = {}
-    for d in db.get_all_donors():
+    for d in db.donors:
         bg_stats[d['blood_group']] = bg_stats.get(d['blood_group'], 0) + 1
     urg_stats = {}
     for r in reqs:
         urg_stats[r['urgency']] = urg_stats.get(r['urgency'], 0) + 1
     return jsonify({
-        'users':           len(db.get_all_users()),
-        'donors':          len(db.get_all_donors()),
-        'available_donors': len([d for d in db.get_all_donors() if d.get('availability')]),
+        'users':           len(db.users),
+        'donors':          len(db.donors),
+        'available_donors': len([d for d in db.donors if d.get('availability')]),
         'total_requests':  total_r,
         'pending':         pending_r,
         'matched':         matched_r,
@@ -716,14 +613,14 @@ def admin_stats():
         'fulfillment_rate': round(matched_r / total_r * 100, 1) if total_r else 0,
         'blood_group_stats': bg_stats,
         'urgency_stats':     urg_stats,
-        'recent_logs':       db.get_all_logs()[-30:],
-        'total_notifications': len(db.get_all_notifications()),
+        'recent_logs':       db.logs[-30:],
+        'total_notifications': len(db.notifications),
     }), 200
 
 @app.route('/api/admin/users', methods=['GET'])
 @_role_required('admin')
 def admin_users():
-    return jsonify([_safe_user(u) for u in db.get_all_users()]), 200
+    return jsonify([_safe_user(u) for u in db.users]), 200
 
 @app.route('/api/admin/users/<uid>/toggle', methods=['PATCH'])
 @_role_required('admin')
